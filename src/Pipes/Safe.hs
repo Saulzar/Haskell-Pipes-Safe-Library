@@ -1,6 +1,3 @@
-{-# LANGUAGE RankNTypes #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-
 {-| This module provides an orphan 'MonadCatch' instance for 'Proxy' of the
     form:
 
@@ -50,7 +47,7 @@ import Pipes.Safe
 
 > mask_ $ do
 >     x <- await
->     lift $ print x
+>     lift $ print xs
 >     lift $ print x
 
     ... then you may receive an asynchronous exception during the 'Pipes.await',
@@ -59,13 +56,16 @@ import Pipes.Safe
     asynchronous exception safety.
 -}
 
+{-# LANGUAGE RankNTypes, MultiParamTypeClasses, FlexibleInstances, FlexibleContexts, FunctionalDependencies #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pipes.Safe
     ( -- * SafeT
       SafeT
     , runSafeT
     , runSafeP
-
-     -- * MonadSafe
+    
+    -- * MonadSafe
     , ReleaseKey
     , MonadSafe(..)
     , onException
@@ -241,12 +241,12 @@ runSafeP m = C.bracket
 newtype ReleaseKey = ReleaseKey { unlock :: Integer }
 
 -- | 'MonadSafe' lets you 'register' and 'release' finalizers.
-class (MonadCatch m, MonadIO m) => MonadSafe m where
+class (MonadCatch m, MonadIO m, Monad m, Monad base) => MonadSafe m base | m -> base where
     {-| 'register' a finalizer, ensuring that the finalizer gets called if the
         finalizer is not 'release'd before the end of the surrounding 'SafeT'
         block.
     -}
-    register :: IO () -> m ReleaseKey
+    register :: base () -> m ReleaseKey
 
     {-| 'release' a registered finalizer
 
@@ -254,69 +254,102 @@ class (MonadCatch m, MonadIO m) => MonadSafe m where
         Every 'release' after the first one does nothing.
     -}
     release  :: ReleaseKey -> m ()
+    
+    
+    {-| 'liftBase' lift a computation in the base monad
 
-instance (MonadIO m, MonadCatch m) => MonadSafe (SafeT m) where
+    -}
+    liftBase :: base a -> m a
+
+
+instance (MonadIO m, MonadCatch m) => MonadSafe (SafeT m) m where
     register io = do
         ioref <- SafeT R.ask
         liftIO $ do
             Finalizers n fs <- readIORef ioref
-            writeIORef ioref $! Finalizers (n + 1) (M.insert n (liftIO io) fs)
+            writeIORef ioref $! Finalizers (n + 1) (M.insert n io fs)
             return (ReleaseKey n)
     release key = do
         ioref <- SafeT R.ask
         liftIO $ do
             Finalizers n fs <- readIORef ioref
             writeIORef ioref $! Finalizers n (M.delete (unlock key) fs)
+            
+    liftBase = lift
 
-instance (MonadSafe m) => MonadSafe (Proxy a' a b' b m) where
-    register = lift . register
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base) 
+            => MonadSafe (I.IdentityT (t base)) base  where
+    register = lift . register 
     release  = lift . release
+    liftBase = lift . liftBase    
 
-instance (MonadSafe m) => MonadSafe (I.IdentityT m) where
-    register = lift . register
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base) 
+            => MonadSafe (Proxy a' a b' b (t base)) base  where
+    register = lift . register 
     release  = lift . release
+    liftBase = lift . liftBase    
+    
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base) 
+          => MonadSafe (E.CatchT (t base)) base  where
+    register = lift . register 
+    release  = lift . release
+    liftBase = lift . liftBase     
+       
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base) 
+          => MonadSafe (R.ReaderT i (t base)) base  where
+    register = lift . register 
+    release  = lift . release
+    liftBase = lift . liftBase       
+    
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base) 
+          => MonadSafe (S.StateT s (t base)) base  where
+    register = lift . register 
+    release  = lift . release
+    liftBase = lift . liftBase   
+    
+    
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base) 
+          => MonadSafe (S'.StateT i (t base)) base  where
+    register = lift . register 
+    release  = lift . release
+    liftBase = lift . liftBase   
+    
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base, Monoid w) 
+          => MonadSafe (W.WriterT w (t base)) base  where
+    register = lift . register 
+    release  = lift . release
+    liftBase = lift . liftBase 
+    
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base, Monoid w)
+          => MonadSafe (W'.WriterT w (t base)) base  where
+    register = lift . register 
+    release  = lift . release
+    liftBase = lift . liftBase 
+    
+   
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base, Monoid w) 
+          => MonadSafe (RWS.RWST i w s (t base)) base  where
+    register = lift . register 
+    release  = lift . release
+    liftBase = lift . liftBase 
 
-instance (MonadSafe m) => MonadSafe (E.CatchT m) where
-    register = lift . register
+    
+instance (MonadTrans t, Monad (t base), MonadSafe (t base) base, Monoid w) 
+          => MonadSafe (RWS'.RWST i w s (t base)) base  where
+    register = lift . register 
     release  = lift . release
-
-instance (MonadSafe m) => MonadSafe (R.ReaderT i m) where
-    register = lift . register
-    release  = lift . release
-
-instance (MonadSafe m) => MonadSafe (S.StateT s m) where
-    register = lift . register
-    release  = lift . release
-
-instance (MonadSafe m) => MonadSafe (S'.StateT s m) where
-    register = lift . register
-    release  = lift . release
-
-instance (MonadSafe m, Monoid w) => MonadSafe (W.WriterT w m) where
-    register = lift . register
-    release  = lift . release
-
-instance (MonadSafe m, Monoid w) => MonadSafe (W'.WriterT w m) where
-    register = lift . register
-    release  = lift . release
-
-instance (MonadSafe m, Monoid w) => MonadSafe (RWS.RWST i w s m) where
-    register = lift . register
-    release  = lift . release
-
-instance (MonadSafe m, Monoid w) => MonadSafe (RWS'.RWST i w s m) where
-    register = lift . register
-    release  = lift . release
+    liftBase = lift . liftBase 
 
 {-| Analogous to 'C.onException' from @Control.Monad.Catch@, except this also
     protects against premature termination
 
     @(\`onException\` io)@ is a monad morphism.
 -}
-onException :: (MonadSafe m) => m a -> IO b -> m a
+
+onException :: (MonadSafe m base) => m a -> base b -> m a
 m1 `onException` io = do
     key <- register (io >> return ())
-    r   <- m1 `C.onException` liftIO io
+    r   <- m1 `C.onException` liftBase io
     release key
     return r
 {-# INLINABLE onException #-}
@@ -324,34 +357,34 @@ m1 `onException` io = do
 {-| Analogous to 'C.finally' from @Control.Monad.Catch@, except this also
     protects against premature termination
 -}
-finally :: (MonadSafe m) => m a -> IO b -> m a
+finally :: (MonadSafe m base) => m a -> base b -> m a
 m1 `finally` after = bracket_ (return ()) after m1
 {-# INLINABLE finally #-}
 
 {-| Analogous to 'C.bracket' from @Control.Monad.Catch@, except this also
     protects against premature termination
 -}
-bracket :: (MonadSafe m) => IO a -> (a -> IO b) -> (a -> m c) -> m c
+bracket :: (MonadSafe m base) => base a -> (a -> base b) -> (a -> m c) -> m c
 bracket before after action = mask $ \restore -> do
-    h <- liftIO before
+    h <- liftBase before
     r <- restore (action h) `onException` after h
-    _ <- liftIO (after h)
+    _ <- liftBase (after h)
     return r
 {-# INLINABLE bracket #-}
 
 {-| Analogous to 'C.bracket_' from @Control.Monad.Catch@, except this also
     protects against premature termination
 -}
-bracket_ :: (MonadSafe m) => IO a -> IO b -> m c -> m c
+bracket_ :: (MonadSafe m base) => base a -> base b -> m c -> m c
 bracket_ before after action = bracket before (\_ -> after) (\_ -> action)
 {-# INLINABLE bracket_ #-}
 
 {-| Analogous to 'C.bracketOnError' from @Control.Monad.Catch@, except this also
     protects against premature termination
 -}
-bracketOnError :: (MonadSafe m) => IO a -> (a -> IO b) -> (a -> m c) -> m c
+bracketOnError :: (MonadSafe m base) => base a -> (a -> base b) -> (a -> m c) -> m c
 bracketOnError before after action = mask $ \restore -> do
-    h <- liftIO before
+    h <- liftBase before
     restore (action h) `onException` after h
 {-# INLINABLE bracketOnError #-}
 
